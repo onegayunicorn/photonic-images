@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PHOTONIC-Ω | 5-Channel Photonic Pipeline</title>
+<style>
+  *{margin:0;overflow:hidden;background:#05050a}
+  canvas{width:100vw;height:100vh;display:block}
+  .overlay{position:fixed;top:1rem;left:1rem;color:#ffe;padding:1rem;font-family:monospace;z-index:10}
+</style>
+</head>
+<body>
+<div class="overlay">
+  <strong>PHOTONIC-Ω</strong><br>
+  5-CHANNEL · DUAL-PASS FBO<br>
+  LUMINANCE GATE · NO BRANCHING
+</div>
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+
+// ─── UTIL: RGB ↔ HSV ─────────────────────────────────────
+const rgb2hsv = c => {
+  const p = c.g < c.b ? [c.b, c.g, -1/3, 2/3] : [c.g, c.b, 0, -1/6];
+  const q = c.r < p[0] ? [p[0], p[1], p[3], c.r] : [c.r, p[1]+1/3, p[2], p[0]];
+  const d = q[0] - Math.min(q[3], q[1]);
+  const e = 1e-10;
+  return [Math.abs(q[2] + (q[3]-q[1])/(6*d+e)), d/(q[0]+e), q[0]];
+};
+const hsv2rgb = c => {
+  const k = n => (n + c[0]*6) % 6;
+  const a = n => c[2] - c[2]*c[1]*Math.max(0, Math.min(k(n), 4-k(n), 1));
+  return [a(5), a(3), a(1)];
+};
+
+// ─── SHADERS ──────────────────────────────────────────────
+const vertBasic = `
+varying vec2 vUv;
+void main() {
+  vUv = uv;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`;
+
+const fragLuminance = `
+precision highp float;
+uniform sampler2D tSource;
+varying vec2 vUv;
+
+vec3 rgb2hsv(vec3 c) {
+  vec4 K = vec4(0.0, -1.0/3.0, 2.0/3.0, -1.0);
+  vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+  vec4 q = mix(p.xyzw, vec4(c.b, c.rg), step(p.x, c.r));
+  float d = q.x - min(q.w, q.y);
+  float e = 1e-10;
+  return vec3(abs(q.z + (q.w - q.y)/(6.0*d+e)), d/(q.x+e), q.x);
+}
+vec3 hsv2rgb(vec3 c) {
+  vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
+  vec3 p = abs(fract(c.xxx + K.xyz)*6.0 - K.www);
+  return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+
+uniform vec2 uResolution;
+uniform float uTime;
+uniform sampler2D tSource;
+varying vec2 vUv;
+
+void main() {
+  vec4 color = texture2D(tSource, vUv);
+  float L = dot(color.rgb, vec3(0.299, 0.587, 0.114));
+  float bright = smoothstep(0.75, 0.92, L);
+  
+  vec3 hsv = rgb2hsv(color.rgb);
+  hsv.y *= 1.25;
+  hsv.z *= 1.15;
+  
+  gl_FragColor = vec4(hsv2rgb(hsv) * bright, bright);
+}`;
+
+const fragBloom = `
+precision highp float;
+uniform sampler2D tScene;
+uniform sampler2D tGlow;
+uniform float uTime;
+uniform vec2 uDirection;
+varying vec2 vUv;
+
+const vec3 c1 = vec3(0.20, 0.40, 0.60); // base
+const vec3 c2 = vec3(0.70, 0.20, 0.90); // violet
+const vec3 c3 = vec3(0.20, 0.90, 0.40); // life
+const vec3 c4 = vec3(1.00, 0.85, 0.20); // gold
+const vec3 c5 = vec3(0.50, 0.90, 0.70); // field
+
+vec3 photonicTint(vec3 rgb, float lum) {
+  float t = uTime;
+  vec3 tint = mix(c1, c5, lum);
+  tint = mix(tint, c2, smoothstep(0.4, 0.8, lum * (0.5 + 0.5*sin(t))));
+  tint = mix(tint, c3, smoothstep(0.6, 0.9, lum * (0.5 + 0.5*cos(t*7.83))));
+  tint = mix(tint, c4, smoothstep(0.8, 1.0, lum * (0.5 + 0.5*sin(t*1.618))));
+  return rgb * tint * 1.4;
+}
+
+void main() {
+  vec2 px = 1.0 / vec2(textureSize(tGlow, 0));
+  float blur = 0.0;
+  blur += texture2D(tGlow, vUv + uDirection * vec2(-4.0) * px).a * 0.05;
+  blur += texture2D(tGlow, vUv + uDirection * vec2(-3.0) * px).a * 0.10;
+  blur += texture2D(tGlow, vUv + uDirection * vec2(-2.0) * px).a * 0.15;
+  blur += texture2D(tGlow, vUv + uDirection * vec2(-1.0) * px).a * 0.20;
+  blur += texture2D(tGlow, vUv + uDirection * vec2( 0.0) * px).a * 0.20;
+  blur += texture2D(tGlow, vUv + uDirection * vec2( 1.0) * px).a * 0.20;
+  blur += texture2D(tGlow, vUv + uDirection * vec2( 2.0) * px).a * 0.15;
+  blur += texture2D(tGlow, vUv + uDirection * vec2( 3.0) * px).a * 0.10;
+  blur += texture2D(tGlow, vUv + uDirection * vec2( 4.0) * px).a * 0.05;
+
+  vec4 scene = texture2D(tScene, vUv);
+  vec4 glowSrc = texture2D(tGlow, vUv);
+  vec3 bloomCol = photonicTint(glowSrc.rgb, blur);
+  vec3 final = scene.rgb + bloomCol * blur * 0.6;
+  final = smoothstep(0.0, 1.0, final);
+
+  gl_FragColor = vec4(final, 1.0);
+}`;
+
+// ─── PIPELINE SETUP ───────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const geo = new THREE.PlaneGeometry(2, 2);
+
+// Render targets
+const makeFBO = () => new THREE.WebGLRenderTarget(
+  window.innerWidth, window.innerHeight,
+  { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat, type: THREE.HalfFloatType }
+);
+const fboSource = makeFBO(), fboBright = makeFBO(), fboBlurH = makeFBO(), fboBlurV = makeFBO();
+
+// Materials
+const imgMat = new THREE.MeshBasicMaterial({ map: null });
+const lumMat = new THREE.ShaderMaterial({
+  vertexShader: vertBasic, fragmentShader: fragLuminance,
+  uniforms: { tSource: {value: null}, uTime: {value: 0}, uResolution: {value: [0,0]} }
+});
+const blurHMat = new THREE.ShaderMaterial({
+  vertexShader: vertBasic, fragmentShader: fragBloom,
+  uniforms: { tScene: {value: null}, tGlow: {value: null}, uTime: {value: 0}, uDirection: {value: [1,0]} }
+});
+const blurVMat = blurHMat.clone();
+blurVMat.uniforms.uDirection.value = [0, 1];
+
+const quad = new THREE.Mesh(geo, imgMat);
+const rtScene = new THREE.Scene();
+rtScene.add(quad);
+
+// ─── LOAD YOUR ARTWORK ────────────────────────────────────
+const loader = new THREE.TextureLoader();
+loader.crossOrigin = 'anonymous';
+
+// Replace with your image path
+const artURL = 'https://i.imgur.com/placeholder.jpg'; // ← PUT YOUR IMAGE URL HERE
+
+loader.load(artURL, tex => {
+  tex.minFilter = THREE.LinearFilter;
+  imgMat.map = tex;
+  imgMat.needsUpdate = true;
+  animate();
+}, undefined, err => {
+  console.warn('Image not found — falling back to procedural mandala');
+  // Fallback: generate 5-channel mandala if image missing
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 1024;
+  const ctx = canvas.getContext('2d');
+  const cx = 512, cy = 512;
+  const grad = ctx.createRadialGradient(cx,cy,0, cx,cy,512);
+  grad.addColorStop(0,'#ffd700');
+  grad.addColorStop(0.2,'#a0ff80');
+  grad.addColorStop(0.4,'#40c0ff');
+  grad.addColorStop(0.6,'#8040ff');
+  grad.addColorStop(1,'#000510');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0,0,1024,1024);
+  for(let i=0;i<5;i++){
+    const ang = (i/5)*Math.PI*2 - Math.PI/2;
+    ctx.beginPath();
+    ctx.moveTo(cx,cy);
+    ctx.lineTo(cx+Math.cos(ang)*500, cy+Math.sin(ang)*500);
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 8;
+    ctx.stroke();
+  }
+  const fallbackTex = new THREE.CanvasTexture(canvas);
+  imgMat.map = fallbackTex;
+  animate();
+});
+
+function resize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h);
+  [fboSource, fboBright, fboBlurH, fboBlurV].forEach(fbo => {
+    fbo.setSize(w, h);
+  });
+  lumMat.uniforms.uResolution.value = [w, h];
+}
+window.addEventListener('resize', resize);
+resize();
+
+function animate(t=0) {
+  requestAnimationFrame(animate);
+  const time = t * 0.001;
+
+  // Pass 0 — render source image
+  quad.material = imgMat;
+  renderer.setRenderTarget(fboSource);
+  renderer.render(rtScene, camera);
+
+  // Pass 1 — luminance extraction
+  quad.material = lumMat;
+  lumMat.uniforms.tSource.value = fboSource.texture;
+  lumMat.uniforms.uTime.value = time;
+  renderer.setRenderTarget(fboBright);
+  renderer.render(rtScene, camera);
+
+  // Pass 2 — horizontal blur
+  quad.material = blurHMat;
+  blurHMat.uniforms.tScene.value = fboSource.texture;
+  blurHMat.uniforms.tGlow.value = fboBright.texture;
+  blurHMat.uniforms.uTime.value = time;
+  renderer.setRenderTarget(fboBlurH);
+  renderer.render(rtScene, camera);
+
+  // Pass 3 — vertical blur + composite
+  quad.material = blurVMat;
+  blurVMat.uniforms.tGlow.value = fboBlurH.texture;
+  renderer.setRenderTarget(null);
+  renderer.render(rtScene, camera);
+}
+</script>
+</body>
+</html>
